@@ -478,11 +478,7 @@ async function onSignedIn(user){
   if(!canEdit){
     ['fileNT','fileSales','filePurch','fileImports','fileTrust'].forEach(id=>{ if($(id)) $(id).disabled=true; });
     document.querySelectorAll('.filebox label.up').forEach(l=>{ l.style.opacity='.45'; l.style.cursor='not-allowed'; });
-<<<<<<< Updated upstream
-    ['prevCredit','otherAdj','pPayDate','pWeekRate','pFixed','ref16','ref17',
-=======
     ['prevCredit','adjReg','adjDept','pPayDate','pWeekRate','pFixed','ref16','ref17',
->>>>>>> Stashed changes
      'regName','regTaxNo','regPhone','regCell','regAddress','regGov','regIBAN','regEmail',
      'trustBulkText','trustBulkClass','invPaste'].forEach(id=>{ if($(id)) $(id).disabled=true; });
   }
