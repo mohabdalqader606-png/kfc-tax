@@ -470,6 +470,30 @@ function normProp(p){ p=String(p||'').trim();
   if(/معف/.test(p)) return 'exempt';
   return 'export'; }
 function effClass(code, fallback){ return (ccMap[code] && ccMap[code].class) || fallback || 'export'; }
+/* تاريخ من أي صيغة: نص يوم/شهر/سنة أو سنة-شهر-يوم أو رقم إكسل التسلسلي */
+function parseAnyDate(v){
+  if(v===''||v===null||v===undefined) return null;
+  if(typeof v==='number' && v>20000 && v<80000){
+    const d=new Date(Math.round((v-25569)*86400000));
+    return new Date(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate());
+  }
+  const s=String(v).trim(); if(!s) return null;
+  let m=s.match(/^(\d{4})[-\/](\d{1,2})[-\/](\d{1,2})/);
+  if(m) return new Date(+m[1], +m[2]-1, +m[3]);
+  m=s.match(/^(\d{1,2})[-\/.](\d{1,2})[-\/.](\d{2,4})/);
+  if(m){ let y=+m[3]; if(y<100) y+=2000; return new Date(y, +m[2]-1, +m[1]); }
+  return null;
+}
+function fmtDMY(d){ return String(d.getDate()).padStart(2,'0')+'/'+String(d.getMonth()+1).padStart(2,'0')+'/'+d.getFullYear(); }
+/* فحص تاريخ الوصل المالي: مفقود / غير مقروء / خارج حدود الفترة المختارة ← مرفوض */
+function finDateIssue(v){
+  const y=+$('fYear').value, p=+$('fPeriod').value;
+  const d=parseAnyDate(v);
+  if(!d) return (v!==''&&v!==null&&v!==undefined&&String(v).trim()!=='')?'تاريخ الوصل المالي غير مقروء':'تاريخ الوصل المالي مفقود';
+  const s=new Date(y,(p-1)*2,1), e=new Date(y,p*2,0,23,59,59);
+  if(d<s||d>e) return 'تاريخ الوصل '+fmtDMY(d)+' خارج حدود الفترة ('+fmtDMY(s)+' — '+fmtDMY(e)+')';
+  return '';
+}
 function periodInfo(year,pno){ const mEnd=pno*2;
   const end=new Date(year,mEnd,0), due=new Date(year,mEnd+1,0);
   const iso=d=>d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0');
@@ -1356,13 +1380,32 @@ async function onFileImports(inp){
     const items=iItems>=0?String(r[iItems]||'').trim():'';
     let rt=pnum(rateCell); if(rt>0 && rt<1) rt=r3(rt*100);
     // بيان برقم قيد نصي (مثل "مواد دعائية") = خارج الكشف الضريبي — يُستبعد تلقائياً مع إمكانية التعديل
-    const excl = entry!=='' && !/^[\d\/\s.+-]+$/.test(entry);
+    let excl = entry!=='' && !/^[\d\/\s.+-]+$/.test(entry);
     // تصنيف أسطر النسبة صفر: أصناف معفاة (طحين/زيت/فاصولياء...) أم جهة صفرية (لحوم/أسماك...)
     let cls0='zero';
     if(rt===0 && /طحين|زيت|فاصوليا|بقول|سكر|أرز|ارز|حليب|عدس|شاي|قهوة/.test(items)) cls0='exm';
-    rowsOut.push({no, dateFin:iDateF>=0?String(r[iDateF]||'').trim():'',
+    // تاريخ الوصل المالي هو المعتمد: مفقود أو غير مقروء أو خارج حدود الفترة ← مرفوض (يُستبعد تلقائياً)
+    const dfRaw=iDateF>=0?r[iDateF]:'';
+    const dfD=parseAnyDate(dfRaw);
+    const dateFin=dfD?fmtDMY(dfD):String(dfRaw||'').trim();
+    const finErr=finDateIssue(dfRaw);
+    if(finErr) excl=true;
+    rowsOut.push({no, dateFin,
       dateDecl:iDateD>=0?String(r[iDateD]||'').trim():'', order:iOrder>=0?String(r[iOrder]||'').trim():'',
-      entry, items, rate:rt, base:r3(base), tax:r3(tax), excl, cls0});
+      entry, items, rate:rt, base:r3(base), tax:r3(tax), excl, cls0, finErr:finErr||undefined});
+  }
+  const nRej=rowsOut.filter(r=>r.finErr).length;
+  if(nRej) alert(`⛔ رُفض ${nRej} سطر من الكشف: تاريخ الوصل المالي مفقود أو غير مقروء أو خارج حدود الفترة المختارة.\nالأسطر المرفوضة ظاهرة بالجدول رمادية (مستبعدة) مع سبب الرفض بعمود «فحص» — صحّح الملف وأعد رفعه، أو أزل ☑ الاستبعاد يدوياً إن كان التاريخ صحيحاً فعلاً.`);
+  // الأسطر المضافة سابقاً من قراءة PDF تبقى — إلا إذا صار نفس البيان بنفس النسبة موجوداً في الإكسل (الإكسل أدق فيغلب)
+  const pdfKept=(ST.imports&&ST.imports.rows||[]).filter(r=>r.src==='pdf');
+  if(pdfKept.length){
+    const keys=new Set(rowsOut.map(r=>String(r.no).split('/').pop().trim()+'@'+r.rate));
+    let kept=0, dropped=0;
+    for(const r of pdfKept){
+      const k=String(r.no).split('/').pop().trim()+'@'+r.rate;
+      if(keys.has(k)) dropped++; else { rowsOut.push(r); kept++; }
+    }
+    if(kept||dropped) alert(`تم دمج الإكسل مع أسطر قراءة PDF: أُبقي ${kept} سطر PDF غير موجود بالإكسل${dropped?`، وحُذف ${dropped} سطر PDF لأن بيانه صار موجوداً بالإكسل بنفس النسبة`:''}.`);
   }
   ST.imports={rows:rowsOut, fname:f.name};
   recomputeAll();
@@ -1377,6 +1420,25 @@ let PDF_PENDING=null;
 function anthKey(){ try{ return localStorage.getItem('kfc_anth_key')||''; }catch(e){ return ''; } }
 function setAnthKey(v){ try{ if(v) localStorage.setItem('kfc_anth_key', v.trim()); else localStorage.removeItem('kfc_anth_key'); }catch(e){} }
 function changeAnthKey(){ setAnthKey(''); renderPdfKeyAsk(); }
+function anthWsid(){ try{ return localStorage.getItem('kfc_anth_wsid')||''; }catch(e){ return ''; } }
+function setAnthWsid(v){ try{ if(v) localStorage.setItem('kfc_anth_wsid', v.trim()); else localStorage.removeItem('kfc_anth_wsid'); }catch(e){} }
+function renderPdfWsAsk(){
+  $('pdfReadWrap').innerHTML=`<div class="duebox" style="background:var(--gold-bg); border-color:#E8D9B0; margin-top:10px;">
+    <b>🏢 مطلوب رقم مساحة العمل (Workspace ID) — مرة واحدة فقط</b><br>
+    <span class="hint">مفتاحك من النوع المربوط بالحساب، والـ API بيطلب رقم مساحة العمل معه. طريقة جلبه:
+    افتح <b>platform.claude.com</b> ← من القائمة اليسار <b>Organization settings ← Workspaces</b> ← اضغط على <b>Default</b> ←
+    انسخ الـ <b>Workspace ID</b> (يبدأ بـ wsid_) والصقه هنا.</span>
+    <div class="toolrow" style="margin-top:8px;">
+      <input type="text" id="anthWsidInp" placeholder="wsid_..." style="width:320px; direction:ltr;">
+      <button class="btn-teal btn-sm" onclick="savePdfWsid()">حفظ والمتابعة</button>
+    </div></div>`;
+}
+function savePdfWsid(){
+  const v=($('anthWsidInp').value||'').trim();
+  if(!v){ alert('الصق رقم مساحة العمل أولاً.'); return; }
+  setAnthWsid(v);
+  if(PDF_PENDING) startPdfRead(); else $('pdfReadWrap').innerHTML='<div class="hint" style="margin-top:6px;">تم الحفظ — ارفع ملف PDF الآن.</div>';
+}
 async function loadPdfJs(){
   if(window.pdfjsLib) return window.pdfjsLib;
   await new Promise((res,rej)=>{ const s=document.createElement('script');
@@ -1433,10 +1495,11 @@ async function aiReadPage(b64, prevNo){
       {type:'image', source:{type:'base64', media_type:'image/jpeg', data:b64}},
       {type:'text', text: PDF_PROMPT + (prevNo?`\n- رقم البيان في آخر صفحة رئيسية سابقة: ${prevNo} (استخدمه لصفحات continuation/receipt).`:'')}
     ]}]};
+  const hdrs={'content-type':'application/json','x-api-key':anthKey(),
+      'anthropic-version':'2023-06-01','anthropic-dangerous-direct-browser-access':'true'};
+  if(anthWsid()) hdrs['anthropic-workspace-id']=anthWsid();
   const rs=await fetch('https://api.anthropic.com/v1/messages',{method:'POST',
-    headers:{'content-type':'application/json','x-api-key':anthKey(),
-      'anthropic-version':'2023-06-01','anthropic-dangerous-direct-browser-access':'true'},
-    body:JSON.stringify(body)});
+    headers:hdrs, body:JSON.stringify(body)});
   if(!rs.ok){
     let msg='خطأ '+rs.status; try{ const ej=await rs.json(); msg+=': '+(ej.error&&ej.error.message||''); }catch(e){}
     const err=new Error(msg); err.status=rs.status; throw err;
@@ -1460,7 +1523,7 @@ async function startPdfRead(){
   }catch(e){ PDFR.busy=false; renderPdfKeyAsk('تعذر فتح الملف: '+e.message); return; }
   PDFR.pages=pdf.numPages;
   renderPdfReview();
-  let prevNo='';
+  let prevNo=''; const retried=new Set();
   for(let pg=1; pg<=pdf.numPages; pg++){
     if(PDFR.cancel) break;
     try{
@@ -1487,6 +1550,15 @@ async function startPdfRead(){
         PDFR.errs.push(`صفحة ${pg}: بيان ${no||'؟'} بلا أسطر ضريبة مقروءة — راجعها يدوياً`);
     }catch(e){
       if(e.status===401){ PDFR.busy=false; renderPdfKeyAsk('المفتاح مرفوض (401) — الصق مفتاحاً صحيحاً.'); PDF_PENDING=f; return; }
+      if(e.status===400 && /workspace.?id/i.test(e.message||'')){
+        PDFR.busy=false; PDF_PENDING=f; renderPdfWsAsk(); return; }
+      if(e.status===403){ PDFR.busy=false; renderPdfKeyAsk('الوصول مرفوض (403) — تأكد من المفتاح ومن وجود رصيد بالحساب.'); PDF_PENDING=f; return; }
+      if((e.status===429 || e.status===529 || e.status===500) && !retried.has(pg)){
+        // ضغط مؤقت على الخدمة: انتظار ثم محاولة ثانية واحدة لنفس الصفحة
+        retried.add(pg);
+        await new Promise(r=>setTimeout(r,20000));
+        pg--; continue;
+      }
       PDFR.errs.push(`صفحة ${pg}: ${e.message}`);
     }
     PDFR.done=pg;
@@ -1508,6 +1580,8 @@ function pdfClear(){ if(PDFR.busy){ alert('ألغِ القراءة أولاً.')
 function pdfRowIssue(r){
   const iss=[];
   if(!r.no) iss.push('رقم البيان فارغ');
+  const fe=finDateIssue(r.dateFin);
+  if(fe) iss.push(fe+' — مرفوض');
   if(r.rate>0){ const dev=r3(r.tax-r.base*r.rate/100); if(Math.abs(dev)>0.02) iss.push(`الضريبة ≠ القيمة×النسبة (فرق ${fmt(dev)})`); }
   return iss.join(' · ');
 }
@@ -1565,23 +1639,32 @@ function pdfApprove(){
   if(!canEdit){ alert('صلاحيتك مطالعة فقط.'); return; }
   const picked=PDFR.rows.filter(r=>r.use);
   if(!picked.length){ alert('لا أسطر محددة.'); return; }
-  const bad=picked.filter(r=>pdfRowIssue(r));
+  // تاريخ الوصل المالي هو المعتمد: مفقود أو غير مقروء أو خارج الفترة ← السطر مرفوض ولا يدخل الكشف
+  const dateBad=picked.filter(r=>finDateIssue(r.dateFin));
+  const good=picked.filter(r=>!finDateIssue(r.dateFin));
+  if(!good.length){
+    alert('⛔ كل الأسطر المحددة مرفوضة: تاريخ الوصل المالي مفقود أو غير مقروء أو خارج حدود الفترة.\nاكتب التاريخ الصحيح في عمود «تاريخ الوصل» بجدول المراجعة (يوم/شهر/سنة) ثم أعد الاعتماد.');
+    return;
+  }
+  const bad=good.filter(r=>pdfRowIssue(r));
   if(bad.length && !confirm(`${bad.length} سطر عليه ملاحظة فحص (⚠) — اعتماد رغم ذلك؟`)) return;
   if(!ST.imports) ST.imports={rows:[], fname:'قراءة PDF'};
   let added=0, skipped=0;
-  for(const r of picked){
+  for(const r of good){
     if(pdfExisting(r)){ skipped++; continue; }
     let cls0='zero';
     if(r.rate===0 && /طحين|زيت|فاصوليا|بقول|سكر|أرز|ارز|حليب|عدس|شاي|قهوة/.test(r.items||'')) cls0='exm';
-    ST.imports.rows.push({no:r.no, dateFin:r.dateFin||'', dateDecl:r.dateDecl||'', order:'',
+    const dd=parseAnyDate(r.dateFin);
+    ST.imports.rows.push({no:r.no, dateFin:dd?fmtDMY(dd):String(r.dateFin||''), dateDecl:r.dateDecl||'', order:'',
       entry:'', items:r.items||'', rate:+r.rate||0, base:r3(r.base), tax:r3(r.tax),
       excl:false, cls0, src:'pdf'});
     added++;
   }
-  PDFR.rows=[]; PDFR.errs=[]; PDFR.pages=0; PDFR.done=0;
-  $('fnamePdfImports').textContent='';
-  recomputeAll();
-  alert(`تمت الإضافة: ${added} سطر${skipped?` — وتخطّي ${skipped} موجود مسبقاً`:''}. الأسطر الجديدة دخلت الكشف وفحوصاته وستُحفظ تلقائياً.`);
+  // الأسطر المرفوضة بسبب التاريخ تبقى في جدول المراجعة لتصحيحها ثم إعادة الاعتماد
+  PDFR.rows=PDFR.rows.filter(r=>!good.includes(r));
+  if(!PDFR.rows.length){ PDFR.errs=[]; PDFR.pages=0; PDFR.done=0; $('fnamePdfImports').textContent=''; }
+  recomputeAll(); renderPdfReview();
+  alert(`تمت الإضافة: ${added} سطر${skipped?` — وتخطّي ${skipped} موجود مسبقاً`:''}${dateBad.length?`\n⛔ ورُفض ${dateBad.length} سطر (تاريخ الوصل المالي) — بقيت بجدول المراجعة لتصحيح تاريخها ثم إعادة الاعتماد`:''}.`);
 }
 
 /* فحوصات المستوردات: المعادلة سطرياً + المطابقة بيان-بيان مع قيود الأمانات */
@@ -1938,8 +2021,9 @@ function renderAll(C){
     const dupMap={};
     ST.imports.rows.forEach(r=>{ if(!r.excl){ const k=r.no+'@'+r.rate; dupMap[k]=(dupMap[k]||0)+1; } });
     const rowIssue=r=>{
-      if(r.excl) return '';
+      if(r.excl) return r.finErr||'';
       const iss=[];
+      if(r.finErr) iss.push(r.finErr);
       if(r.rate>0){ const exp=r3(r.base*r.rate/100), dev=r3(r.tax-exp);
         if(Math.abs(dev)>0.02) iss.push(`متوقع ${fmt(exp)} (فرق ${fmt(dev)})`); }
       if(r.no && dupMap[r.no+'@'+r.rate]>1) iss.push('بيان مكرر بنفس النسبة');
