@@ -538,7 +538,12 @@ async function doLogout(){ await sb.auth.signOut(); location.reload(); }
 async function onSignedIn(user){
   curUser=user;
   const {data:prof}=await sb.from('profiles').select('*').eq('id',user.id).single();
-  curProfile=prof||{full_name:user.email, role:'viewer'};
+  curProfile=prof||{full_name:user.email, role:'viewer', allowed_apps:[]};
+  if(!(curProfile.allowed_apps||[]).includes('kfc-tax')){
+    await sb.auth.signOut();
+    setMsg('loginMsg','هذا الحساب ما إله صلاحية الدخول على هاي الشاشة — تواصل مع المدير.','err');
+    return;
+  }
   roleEdit=['admin','editor'].includes(curProfile.role);
   isAdmin=curProfile.role==='admin';
   canEdit=roleEdit;
